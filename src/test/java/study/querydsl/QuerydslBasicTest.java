@@ -2,6 +2,9 @@ package study.querydsl;
 
 import com.querydsl.core.QueryResults;
 import com.querydsl.core.Tuple;
+import com.querydsl.core.types.dsl.CaseBuilder;
+import com.querydsl.core.types.dsl.Expressions;
+import com.querydsl.core.types.dsl.NumberExpression;
 import com.querydsl.jpa.JPAExpressions;
 import com.querydsl.jpa.impl.JPAQueryFactory;
 import org.junit.jupiter.api.BeforeEach;
@@ -403,6 +406,7 @@ public class QuerydslBasicTest {
 
         Member findMember = queryFactory
                 .selectFrom(member)
+                .join(member.team, team)//.fetchJoin()
                 .where(member.username.eq("member1"))
                 .fetchOne();
 
@@ -416,13 +420,14 @@ public class QuerydslBasicTest {
     public void fetchJoinUse() throws Exception {
         em.flush();
         em.clear();
+
         Member findMember = queryFactory
                 .selectFrom(member)
                 .join(member.team, team).fetchJoin()
                 .where(member.username.eq("member1"))
                 .fetchOne();
-        boolean loaded =
-                emf.getPersistenceUnitUtil().isLoaded(findMember.getTeam());
+
+        boolean loaded = emf.getPersistenceUnitUtil().isLoaded(findMember.getTeam());
         assertThat(loaded).as("페치 조인 적용").isTrue();
 
         // 사용방법: join(), leftJoin() 등 조인 기능 뒤에 fetchJoin() 이라고 추가하면 된다.
@@ -488,34 +493,24 @@ public class QuerydslBasicTest {
                 .fetch();
         assertThat(result).extracting("age")
                 .containsExactly(20, 30, 40);
-    }
 
-    /*
-    select 절에 subquery
-    List<Tuple> fetch = queryFactory
-     .select(member.username,
-     JPAExpressions
-     .select(memberSub.age.avg())
-     .from(memberSub)
-     ).from(member)
-     .fetch();
-    for (Tuple tuple : fetch) {
-     System.out.println("username = " + tuple.get(member.username));
-     System.out.println("age = " +
-    tuple.get(JPAExpressions.select(memberSub.age.avg())
-     .from(memberSub)));
-    }
-     */
 
-    // static import 활용
-//    import static com.querydsl.jpa.JPAExpressions.select;
-//    List<Member> result = queryFactory
-//            .selectFrom(member)
-//            .where(member.age.eq(
-//                    select(memberSub.age.max())
-//                            .from(memberSub)
-//            ))
-//            .fetch()
+        // select 절에 subquery
+        List<Tuple> fetch = queryFactory
+                .select(member.username,
+                        JPAExpressions // select 절에 subquery
+                                .select(memberSub.age.avg())
+                                .from(memberSub)
+                ).from(member)
+                .fetch();
+
+        for (Tuple tuple : fetch) {
+            System.out.println("username = " + tuple.get(member.username));
+            System.out.println("age = " +
+                    tuple.get(JPAExpressions.select(memberSub.age.avg())
+                            .from(memberSub)));
+        }
+    }
 
     /*
     <from 절의 서브쿼리 한계>
@@ -531,5 +526,84 @@ public class QuerydslBasicTest {
         2. 애플리케이션에서 쿼리를 2번 분리해서 실행한다.
         3. nativeSQL을 사용한다.
      */
+
+    /*
+    Case 문
+     - select, 조건절(where), order by에서 사용 가능
+     */
+    @Test
+    public void where_case(){
+
+        // 단순한 조건
+        List<String> result = queryFactory
+                .select(member.age
+                        .when(10).then("열살") // when, then
+                        .when(20).then("스무살")
+                        .otherwise("기타")) // otherwise
+                .from(member)
+                .fetch();
+
+        // 복잡한 조건
+        List<String> result2 = queryFactory
+                .select(new CaseBuilder() // CaseBuilder
+                        .when(member.age.between(0, 20)).then("0~20살")
+                        .when(member.age.between(21, 30)).then("21~30살")
+                        .otherwise("기타"))
+                .from(member)
+                .fetch();
+
+        /*
+         orderBy에서 Case 문 함께 사용하기 예제
+          - 예를 들어서 다음과 같은 임의의 순서로 회원을 출력하고 싶다면?
+
+          1. 0 ~ 30살이 아닌 회원을 가장 먼저 출력
+          2. 0 ~ 20살 회원 출력
+          3. 21 ~ 30살 회원 출력
+
+         Querydsl은 자바 코드로 작성하기 때문에 rankPath 처럼 복잡한 조건을 변수로 선언해서 select 절, orderBy 절에서 함께 사용할 수 있다
+         */
+        NumberExpression<Integer> rankPath = new CaseBuilder()
+                .when(member.age.between(0, 20)).then(2)
+                .when(member.age.between(21, 30)).then(1)
+                .otherwise(3);
+
+        List<Tuple> result3 = queryFactory
+                .select(member.username, member.age, rankPath)
+                .from(member)
+                .orderBy(rankPath.desc())
+                .fetch();
+
+        for (Tuple tuple : result3) {
+            String username = tuple.get(member.username);
+            Integer age = tuple.get(member.age);
+            Integer rank = tuple.get(rankPath);
+            System.out.println("username = " + username + " age = " + age + " rank = " + rank);
+        }
+
+        /*
+         상수, 문자 더하기
+            상수가 필요하면 Expressions.constant(xxx) 사용
+            참고: 아래와 같이 최적화가 가능하면 SQL에 constant 값을 넘기지 않는다.
+            상수를 더하는 것 처럼 최적화가 어려우면 SQL에 constant 값을 넘긴다.
+         */
+        Tuple result4 = queryFactory
+                .select(member.username, Expressions.constant("A"))
+                .from(member)
+                .fetchFirst();
+
+
+        /*
+         문자 더하기 concat
+            참고: member.age.stringValue() 부분이 중요한데, 문자가 아닌 다른 타입들은 stringValue() 로 문자로 변환할 수 있다.
+            이 방법은 ENUM을 처리할 때도 자주 사용한다.
+         */
+        String result5 = queryFactory
+                .select(member.username.concat("_").concat(member.age.stringValue()))
+                .from(member)
+                .where(member.username.eq("member1"))
+                .fetchOne();
+
+    }
+
 
 } //end class
